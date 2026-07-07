@@ -2790,8 +2790,6 @@ function handleImportFile(input) {
 }
 
 function _parseExcelTournament(wb) {
-  // Column indices matching the CSC Chicureo format:
-  // 0:Horario 1:Gana1 2:Equipo1 3:Goles1 4:Empate 5:Goles2 6:Equipo2 7:Gana2 8:Cancha
   const TEAM_COLORS = [
     '#e74c3c','#e67e22','#f1c40f','#2ecc71','#1abc9c','#3498db',
     '#9b59b6','#e91e63','#795548','#607d8b','#16a085','#d35400',
@@ -2800,34 +2798,68 @@ function _parseExcelTournament(wb) {
   let colorIdx = 0;
   const categories = [];
 
+  /* Limpia un valor de celda: quita espacios normales y no-rompibles (\xa0) */
+  const clean = v => v != null ? String(v).replace(/[\xa0​]/g, ' ').trim() : '';
+
   for (const sheetName of wb.SheetNames) {
     const ws   = wb.Sheets[sheetName];
     const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:null, raw:false});
     if (rows.length < 2) continue;
 
-    // Parse match rows (row 0 = header, skip it)
+    /* ── Detectar columnas leyendo el encabezado ──
+       Soporta dos formatos:
+         Formato A (CSC2/estándar): Horario | Equipo1 | Goles1 | Goles2 | Equipo2 | Cancha
+         Formato B (Chicureo):      Horario | Gana1 | Equipo1 | Goles1 | Empate | Goles2 | Equipo2 | Gana2 | Cancha */
+    const hdr = (rows[0] || []).map(h => clean(h).toLowerCase());
+    const findCol = (...keywords) => {
+      for (const kw of keywords) {
+        const i = hdr.findIndex(h => h.includes(kw));
+        if (i !== -1) return i;
+      }
+      return -1;
+    };
+    let colT1 = findCol('nombre equipo 1', 'equipo 1', 'equipo1', 'local');
+    let colS1 = findCol('goles equipo 1', 'goles1', 'score1');
+    let colS2 = findCol('goles equipo 2', 'goles2', 'score2');
+    let colT2 = findCol('nombre equipo 2', 'equipo 2', 'equipo2', 'visita');
+    /* Fallback al formato Chicureo si el encabezado no coincide */
+    if (colT1 < 0) colT1 = 2;
+    if (colS1 < 0) colS1 = 3;
+    if (colS2 < 0) colS2 = 5;
+    if (colT2 < 0) colT2 = 6;
+
+    /* ── Parsear filas de partidos ── */
     const matchData = [];
     for (let i = 1; i < rows.length; i++) {
-      const row = rows[i];
-      const team1  = row[2] ? String(row[2]).trim() : null;
-      const team2  = row[6] ? String(row[6]).trim() : null;
-      const score1 = parseInt(row[3]);
-      const score2 = parseInt(row[5]);
+      const row  = rows[i];
+      const team1 = clean(row[colT1]);
+      const team2 = clean(row[colT2]);
+      const score1 = parseInt(row[colS1]);
+      const score2 = parseInt(row[colS2]);
       if (!team1 || !team2) continue;
       if (isNaN(score1) || isNaN(score2)) continue;
-      matchData.push({team1, score1, team2, score2});
+      /* Ignorar filas informativas como "No se armó la categoría" */
+      if (/no se arm/i.test(team1) || /no se arm/i.test(team2)) continue;
+        /* Normalizar horario a "HH:MM" */
+      let timeStr = '';
+      const rawTime = row[0];
+      if (rawTime) {
+        const ts = String(rawTime).trim().replace(',', '.').replace('–','-');
+        const colon = /^(\d{1,2}):(\d{2})$/.exec(ts);
+        const dot   = /^(\d{1,2})\.(\d{2})$/.exec(ts);
+        if (colon) timeStr = `${colon[1].padStart(2,'0')}:${colon[2]}`;
+        else if (dot) timeStr = `${dot[1].padStart(2,'0')}:${dot[2]}`;
+      }
+      matchData.push({ team1, score1, team2, score2, time: timeStr });
     }
     if (!matchData.length) continue;
 
-    // All unique team names
+    /* ── BFS para detectar grupos (componentes conexas) ── */
     const teamNames = [...new Set([...matchData.map(m=>m.team1), ...matchData.map(m=>m.team2)])];
-
-    // Build adjacency graph: edge = "played each other"
     const adj = {};
     teamNames.forEach(t => { adj[t] = new Set(); });
     matchData.forEach(m => { adj[m.team1].add(m.team2); adj[m.team2].add(m.team1); });
 
-    // BFS to find connected components = groups
     const visited  = new Set();
     const groupSets = [];
     for (const team of teamNames) {
@@ -2843,46 +2875,42 @@ function _parseExcelTournament(wb) {
       groupSets.push(component);
     }
 
-    // Create team objects
+    /* ── Crear objetos de equipo y grupo ── */
     const teamObjs = {};
     teamNames.forEach(name => {
-      teamObjs[name] = {
-        id: uuid(), name,
-        color: TEAM_COLORS[colorIdx++ % TEAM_COLORS.length],
-        players: 0, roster: []
-      };
+      teamObjs[name] = { id: uuid(), name, color: TEAM_COLORS[colorIdx++ % TEAM_COLORS.length], players: 0, roster: [] };
     });
 
-    // Create group objects (one round per group, all matches inside)
     const groupObjs = groupSets.map((groupTeams, gi) => {
       const teamIds = groupTeams.map(n => teamObjs[n].id);
       const groupMatches = matchData
         .filter(m => groupTeams.includes(m.team1) && groupTeams.includes(m.team2))
         .map(m => ({
-          id: uuid(),
+          id:      uuid(),
           team1Id: teamObjs[m.team1].id,
           team2Id: teamObjs[m.team2].id,
           score1:  m.score1,
           score2:  m.score2,
           played:  true,
+          time:    m.time || '',
           scorers: []
         }));
       return {
-        id:      uuid(),
-        name:    'Grupo ' + String.fromCharCode(65 + gi),
-        cancha:  String(gi + 1),
+        id:     uuid(),
+        name:   'Grupo ' + String.fromCharCode(65 + gi),
+        cancha: String(gi + 1),
         teamIds,
-        rounds:  [{id: uuid(), name: 'Fase de grupos', matches: groupMatches}]
+        rounds: [{ id: uuid(), name: 'Fase de grupos', matches: groupMatches }]
       };
     });
 
     categories.push({
       id:               uuid(),
-      name:             sheetName,
+      name:             sheetName.trim(),
       teams:            Object.values(teamObjs),
       groups:           groupObjs,
       fixtureGenerated: true,
-      fixtureConfig:    {courts: groupObjs.length, startTime: '8:30'}
+      fixtureConfig:    { courts: groupObjs.length, startTime: '8:30' }
     });
   }
   return categories;
@@ -3196,62 +3224,101 @@ function generateGlobalXLSX(copaKey, tipo) {
   const copa = COPAS[copaKey];
   if (!copa) return;
 
-  const tours = (state.tournaments || []).filter(t => copa.filter(t.name || ''));
-  if (!tours.length) { showToast('Sin torneos para ' + copa.label); return; }
+  /* ── 1. Filtrar solo torneos pasados de esta copa ── */
+  const _today = new Date(); _today.setHours(0,0,0,0);
+  const allTours = (state.tournaments || []).filter(t => {
+    if (!copa.filter(t.name || '')) return false;
+    if (t.status === 'finished') return true;          // cerrado manualmente = siempre incluir
+    const iso = _dateToIso(t.date || '');
+    if (!iso) return false;                            // sin fecha = no incluir
+    return new Date(iso + 'T00:00:00') <= _today;     // fecha pasada o hoy
+  });
+  if (!allTours.length) { showToast('Sin torneos pasados para ' + copa.label); return; }
+
+  /* Ordenar cronológicamente */
+  const tours = [...allTours].sort((a, b) => {
+    const isoA = _dateToIso(a.date || '') || '9999-99-99';
+    const isoB = _dateToIso(b.date || '') || '9999-99-99';
+    return isoA.localeCompare(isoB);
+  });
+
+  /* ── 2. Agrupar categorías por nombre normalizado (case-insensitive + trim) ──
+     Esto evita que "4to", "4TO" o " 4to " aparezcan como categorías distintas */
+  const catGroups = {}; // key normalizado → { displayName, entries: [{tour, cat}] }
+  for (const tour of tours) {
+    for (const cat of (tour.categories || [])) {
+      const raw = (cat.name || 'Sin nombre').trim();
+      const key = raw.toLowerCase();
+      if (!catGroups[key]) catGroups[key] = { displayName: raw, entries: [] };
+      catGroups[key].entries.push({ tour, cat });
+    }
+  }
 
   const wb = XLSX.utils.book_new();
-  const catNames = [...new Set(tours.flatMap(t => (t.categories || []).map(c => c.name || 'Sin nombre')))].sort();
-  const tourList = tours.map(t => t.name).join(' | ');
 
-  for (const catName of catNames) {
+  for (const [, { displayName: catName, entries }] of Object.entries(catGroups).sort(([a],[b]) => a.localeCompare(b))) {
     const standingsMap = {};
     const scorersMap   = {};
+    const usedTours    = []; // torneos que efectivamente aportaron datos a esta categoría
 
-    for (const tour of tours) {
-      for (const cat of (tour.categories || []).filter(c => (c.name || '') === catName)) {
-        for (const g of (cat.groups || [])) {
-          for (const s of calculateGroupStandings(g, cat)) {
-            const k = s.name.toLowerCase().trim();
-            if (!standingsMap[k]) standingsMap[k] = { name: s.name, PJ:0, PG:0, PE:0, PP:0, GF:0, GC:0, DG:0, PTS:0, ESP:0 };
-            standingsMap[k].PJ  += s.PJ;  standingsMap[k].PG  += s.PG;
-            standingsMap[k].PE  += s.PE;  standingsMap[k].PP  += s.PP;
-            standingsMap[k].GF  += s.GF;  standingsMap[k].GC  += s.GC;
-            standingsMap[k].PTS += s.PTS; standingsMap[k].ESP += (s.ESP || 0);
-          }
+    for (const { tour, cat } of entries) {
+      /* Solo incluir si hay al menos un partido jugado en esta categoría */
+      const hasPlayed = (cat.groups || []).some(g =>
+        (g.rounds || []).some(r => (r.matches || []).some(m => m.played))
+      );
+      if (!hasPlayed) continue;
+
+      usedTours.push(`${tour.name}${tour.date ? ' (' + tour.date + ')' : ''}`);
+
+      /* Acumular posiciones — solo equipos que jugaron (PJ > 0) */
+      for (const g of (cat.groups || [])) {
+        for (const s of calculateGroupStandings(g, cat)) {
+          if (!s.PJ) continue;                         // ignorar equipos sin partidos jugados
+          const k = s.name.toLowerCase().trim();
+          if (!standingsMap[k]) standingsMap[k] = { name: s.name, PJ:0, PG:0, PE:0, PP:0, GF:0, GC:0, PTS:0, ESP:0 };
+          standingsMap[k].PJ  += s.PJ;  standingsMap[k].PG  += s.PG;
+          standingsMap[k].PE  += s.PE;  standingsMap[k].PP  += s.PP;
+          standingsMap[k].GF  += s.GF;  standingsMap[k].GC  += s.GC;
+          standingsMap[k].PTS += s.PTS; standingsMap[k].ESP += (s.ESP || 0);
         }
-        for (const s of buildScorersTable(cat)) {
-          const team = (cat.teams || []).find(t => t.id === s.teamId);
-          const teamName = team ? team.name : '?';
-          const k = s.playerName + '||' + teamName;
-          if (!scorersMap[k]) scorersMap[k] = { player: s.playerName, team: teamName, goals: 0 };
-          scorersMap[k].goals += s.goals;
-        }
+      }
+
+      /* Acumular goleadores */
+      for (const s of buildScorersTable(cat)) {
+        const team = (cat.teams || []).find(t => t.id === s.teamId);
+        const teamName = team ? team.name : '?';
+        const k = s.playerName + '||' + teamName;
+        if (!scorersMap[k]) scorersMap[k] = { player: s.playerName, team: teamName, goals: 0 };
+        scorersMap[k].goals += s.goals;
       }
     }
 
+    /* Saltear si no hubo datos reales */
     if (!Object.keys(standingsMap).length && !Object.keys(scorersMap).length) continue;
 
+    /* Calcular DG acumulado y ordenar */
     Object.values(standingsMap).forEach(s => { s.DG = s.GF - s.GC; });
     const standings = Object.values(standingsMap).sort((a,b) => b.PTS-a.PTS || b.DG-a.DG || b.GF-a.GF || a.name.localeCompare(b.name));
     const scorers   = Object.values(scorersMap).sort((a,b) => b.goals-a.goals || a.player.localeCompare(b.player));
     const espiritu  = [...standings].filter(s => s.ESP > 0).sort((a,b) => b.ESP-a.ESP);
 
-    const sn      = (catName || 'Cat').slice(0, 22);
+    /* Nombre de hoja: máx 28 chars (límite Excel) */
+    const sn      = catName.slice(0, 28);
     const header1 = [`${copa.label} — ${catName} — Acumulado todas las fechas`];
-    const header2 = [`Fechas: ${tourList}`];
+    const header2 = [`Torneos incluidos: ${usedTours.join(' | ')}`];
 
     if (tipo === 'posiciones') {
       const rows = [header1, header2, [], ['Pos','Equipo','PJ','PG','PE','PP','GF','GC','DG','PTS'],
         ...standings.map((s,i) => [i+1, s.name, s.PJ, s.PG, s.PE, s.PP, s.GF, s.GC, s.DG, s.PTS])];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), sn.slice(0,28));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), sn);
     } else if (tipo === 'goleadores') {
       const rows = [header1, header2, [], ['Pos','Jugador','Equipo','Goles'],
         ...scorers.map((s,i) => [i+1, s.player, s.team, s.goals])];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), sn.slice(0,28));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), sn);
     } else if (tipo === 'espiritu') {
       const rows = [header1, header2, [], ['Pos','Equipo','Premios Espíritu SC'],
         ...(espiritu.length ? espiritu.map((e,i) => [i+1, e.name, e.ESP]) : [['—','Sin datos aún',0]])];
-      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), sn.slice(0,28));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), sn);
     }
   }
 
@@ -3269,83 +3336,63 @@ function generateTourCompleteXLSX(tourId) {
   const wb = XLSX.utils.book_new();
 
   for (const cat of (tour.categories || [])) {
-    const catName = (cat.name || 'Cat').slice(0, 20);
+    const catName = (cat.name || 'Cat').slice(0, 28);
+    const st = cat.fixtureConfig?.startTime;
+    const [startH, startM] = st ? st.split(':').map(Number) : [0, 0];
 
-    // ── Hoja: Resultados ──
-    const resRows = [];
-    resRows.push([tour.name, '', '', '', cat.name, '', '', tour.date || '']);
-    resRows.push([]);
-    resRows.push(['RESULTADOS', '', '', '', '', '', '', '']);
-    resRows.push(['Categoría', 'Cancha', 'Equipo Local', '', 'Equipo Visitante', 'Resultado', 'Horario', 'Estado']);
+    /* ── Recolectar todos los partidos con su horario ── */
+    const allMatches = [];
     for (const g of (cat.groups || [])) {
-      const cancha = g.cancha ? `Cancha ${g.cancha}` : g.name;
-      const st = cat.fixtureConfig?.startTime;
       (g.rounds || []).forEach((round, ri) => {
         (round.matches || []).forEach((m, mi) => {
-          const t1 = (cat.teams || []).find(t => t.id === m.team1Id);
-          const t2 = (cat.teams || []).find(t => t.id === m.team2Id);
-          const mins = (() => { if (!st) return null; const [h,mn]=st.split(':').map(Number); return h*60+mn+(ri*2+mi)*30; })();
-          const time = mins !== null ? `${String(Math.floor(mins/60)).padStart(2,'0')}:${String(mins%60).padStart(2,'0')}` : '';
-          resRows.push([
-            cat.name, cancha,
-            t1?.name || '?', 'vs', t2?.name || '?',
-            m.played ? `${m.score1} - ${m.score2}` : '-',
-            time,
-            m.played ? 'Jugado' : 'Pendiente'
-          ]);
+          const t1   = (cat.teams || []).find(t => t.id === m.team1Id);
+          const t2   = (cat.teams || []).find(t => t.id === m.team2Id);
+
+          /* Prioridad: horario guardado en el partido (importados),
+             si no hay → calcular desde startTime del fixture */
+          let timeStr = m.time || '';
+          let sortKey = 0;
+          if (timeStr) {
+            const [hh, mm] = timeStr.split(':').map(Number);
+            sortKey = hh * 60 + mm;
+          } else if (st) {
+            const totalMins = startH * 60 + startM + (ri * 2 + mi) * 30;
+            timeStr = `${String(Math.floor(totalMins / 60)).padStart(2,'0')}:${String(totalMins % 60).padStart(2,'0')}`;
+            sortKey = totalMins;
+          }
+
+          allMatches.push({
+            sortKey,
+            row: [
+              timeStr,
+              t1?.name || '?',
+              m.played ? m.score1 : '',
+              m.played ? m.score2 : '',
+              t2?.name || '?',
+              g.cancha || ''
+            ]
+          });
         });
       });
-      resRows.push([]);
     }
 
-    // ── Hoja: Posiciones ──
-    const posRows = [];
-    posRows.push([tour.name, '', '', '', cat.name]);
-    posRows.push([]);
-    posRows.push(['POSICIONES', '', '', '', '', '', '', '']);
-    for (const g of (cat.groups || [])) {
-      const cancha = g.cancha ? `Cancha ${g.cancha}` : g.name;
-      posRows.push([cancha]);
-      posRows.push(['Pos', 'Equipo', 'PJ', 'PG', 'PE', 'PP', 'GF', 'GC', 'DG', 'PTS']);
-      const standings = calculateGroupStandings(g, cat);
-      standings.forEach((s, i) => {
-        posRows.push([i + 1, s.name, s.PJ, s.PG, s.PE, s.PP, s.GF, s.GC, s.DG, s.PTS]);
-      });
-      posRows.push([]);
-    }
+    /* Ordenar cronológicamente */
+    allMatches.sort((a, b) => a.sortKey - b.sortKey || 0);
 
-    // ── Hoja: Goleadores ──
-    const golRows = [];
-    golRows.push([tour.name, '', cat.name]);
-    golRows.push([]);
-    golRows.push(['GOLEADORES']);
-    golRows.push(['Pos', 'Jugador', 'Equipo', 'Goles']);
-    const scorers = buildScorersTable(cat);
-    if (scorers.length === 0) {
-      golRows.push(['', 'Sin goles registrados']);
-    } else {
-      scorers.forEach((s, i) => {
-        const team = (cat.teams || []).find(t => t.id === s.teamId);
-        golRows.push([i + 1, s.playerName, team?.name || '?', s.goals]);
-      });
-    }
+    /* ── Armar hoja ── */
+    const rows = [];
+    rows.push(['Torneo', tour.name, cat.name, tour.date || '']);
+    rows.push(['Horario', 'Nombre Equipo 1', 'Goles equipo 1', 'Goles equipo 2', 'Nombre Equipo 2', 'Cancha']);
+    for (const { row } of allMatches) rows.push(row);
 
-    // Agregar hojas al workbook
-    const wsRes = XLSX.utils.aoa_to_sheet(resRows);
-    wsRes['!cols'] = [{wch:14},{wch:12},{wch:22},{wch:4},{wch:22},{wch:10},{wch:8},{wch:10}];
-    XLSX.utils.book_append_sheet(wb, wsRes, `${catName} - Resultados`);
-
-    const wsPos = XLSX.utils.aoa_to_sheet(posRows);
-    wsPos['!cols'] = [{wch:5},{wch:22},{wch:4},{wch:4},{wch:4},{wch:4},{wch:5},{wch:5},{wch:5},{wch:5}];
-    XLSX.utils.book_append_sheet(wb, wsPos, `${catName} - Posiciones`);
-
-    const wsGol = XLSX.utils.aoa_to_sheet(golRows);
-    wsGol['!cols'] = [{wch:5},{wch:24},{wch:22},{wch:7}];
-    XLSX.utils.book_append_sheet(wb, wsGol, `${catName} - Goleadores`);
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    ws['!cols'] = [{wch:8},{wch:24},{wch:14},{wch:14},{wch:24},{wch:8}];
+    XLSX.utils.book_append_sheet(wb, ws, catName);
   }
 
-  const filename = `${(tour.name||'torneo').replace(/\s+/g,'-').toLowerCase()}-completo.xlsx`;
-  XLSX.writeFile(wb, filename);
+  if (!wb.SheetNames.length) { showToast('Sin datos para exportar'); return; }
+  const slug = (tour.name || 'torneo').replace(/\s+/g, '-').toLowerCase();
+  XLSX.writeFile(wb, `${slug}-${new Date().toISOString().slice(0,10)}.xlsx`);
   showToast('<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><polyline points="20 6 9 17 4 12"/></svg> Excel descargado');
 }
 
