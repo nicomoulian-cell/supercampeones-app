@@ -924,6 +924,69 @@ function nextColor() { return TEAM_COLORS[nextColorIdx++ % TEAM_COLORS.length]; 
 
 const CAT_PRESETS = ['Kinder','1° Básico','2° Básico','3° Básico','4° Básico','5° Básico','6° Básico','Niñas 5-6','Niñas 7-8'];
 
+/* ─── Bloques de horario preset ───────────────────────────────────────────
+   Cada bloque define el horario de inicio y el intervalo entre turnos.
+   El admin elige uno al armar los grupos de una categoría.             */
+const FIXTURE_BLOQUES = [
+  { id: 1, label: 'Bloque 1', startTime: '8:30',  intervalMins: 30, displaySlots: 6 },
+  { id: 2, label: 'Bloque 2', startTime: '9:00',  intervalMins: 30, displaySlots: 6 },
+  { id: 3, label: 'Bloque 3', startTime: '9:00',  intervalMins: 50, displaySlots: 3 },
+  { id: 4, label: 'Bloque 4', startTime: '11:30', intervalMins: 30, displaySlots: 6 },
+  { id: 5, label: 'Bloque 5', startTime: '12:00', intervalMins: 30, displaySlots: 6 },
+  { id: 6, label: 'Bloque 6', startTime: '12:00', intervalMins: 50, displaySlots: 3 },
+];
+
+/* Calcula los horarios de display de un bloque */
+function _getBloqueSlots(b) {
+  const [h, m] = b.startTime.split(':').map(Number);
+  return Array.from({length: b.displaySlots}, (_, i) => {
+    const t = h * 60 + m + i * b.intervalMins;
+    return `${String(Math.floor(t/60)).padStart(2,'0')}:${String(t%60).padStart(2,'0')}`;
+  });
+}
+
+/* Busca cuál bloque coincide con startTime + intervalMins activos */
+function _getSelectedBloque(startTime, intervalMins) {
+  return FIXTURE_BLOQUES.find(b => b.startTime === startTime && b.intervalMins === (intervalMins || 30)) || null;
+}
+
+/* Genera el HTML de las 5 tarjetas de bloque */
+function _renderBloqueCards(selectedStart, selectedInterval) {
+  const selBloque = _getSelectedBloque(selectedStart, selectedInterval);
+  return FIXTURE_BLOQUES.map(b => {
+    const slots  = _getBloqueSlots(b);
+    const active = selBloque?.id === b.id;
+    const slotsHtml = slots.map((s, i) =>
+      `<span style="font-size:11px;font-weight:700;${active?'color:white':'color:var(--green-dark)'};background:${active?'rgba(255,255,255,0.2)':'white'};padding:2px 6px;border-radius:6px;border:1px solid ${active?'rgba(255,255,255,0.4)':'var(--green)'};white-space:nowrap">${s}</span>${i < slots.length-1 ? `<span style="font-size:9px;${active?'color:rgba(255,255,255,0.6)':'color:var(--text-muted)'}">›</span>` : ''}`
+    ).join('');
+    return `
+    <div onclick="setFixtureBloque(${b.id})"
+      style="padding:10px 12px;border-radius:var(--radius-sm);cursor:pointer;transition:all 0.18s;
+        ${active
+          ? 'background:var(--green);border:2px solid var(--green);box-shadow:var(--shadow-green)'
+          : 'background:white;border:2px solid var(--border)'}">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <span style="font-weight:900;font-size:13px;${active?'color:white':'color:var(--text)'}">${b.label}</span>
+        <span style="font-size:10px;font-weight:600;${active?'color:rgba(255,255,255,0.8)':'color:var(--text-light)'}">${b.intervalMins} min/turno</span>
+      </div>
+      <div style="display:flex;gap:3px;flex-wrap:wrap;align-items:center">${slotsHtml}</div>
+    </div>`;
+  }).join('');
+}
+
+// Ordena un array de categorías según el orden canónico de CAT_PRESETS.
+// Las categorías personalizadas (no en el preset) van al final, ordenadas alfabéticamente.
+function _sortCategories(cats) {
+  return cats.sort((a, b) => {
+    const iA = CAT_PRESETS.indexOf(a.name);
+    const iB = CAT_PRESETS.indexOf(b.name);
+    if (iA >= 0 && iB >= 0) return iA - iB;
+    if (iA >= 0) return -1;
+    if (iB >= 0) return 1;
+    return a.name.localeCompare(b.name, 'es');
+  });
+}
+
 /* ═══════════════════════ STATE ═══════════════════════ */
 const STORAGE_KEY = 'supercampeones_v3';
 const PRESET_TOURNAMENTS = [
@@ -2930,7 +2993,7 @@ function confirmImport() {
     name,
     color,
     date,
-    categories: _importedCategories,
+    categories: _sortCategories(_importedCategories),
     status:     'finished'
   };
   state.tournaments.push(tour);
@@ -3338,6 +3401,7 @@ function generateTourCompleteXLSX(tourId) {
   for (const cat of (tour.categories || [])) {
     const catName = (cat.name || 'Cat').slice(0, 28);
     const st = cat.fixtureConfig?.startTime;
+    const iv = cat.fixtureConfig?.intervalMins || 30;
     const [startH, startM] = st ? st.split(':').map(Number) : [0, 0];
 
     /* ── Recolectar todos los partidos con su horario ── */
@@ -3356,7 +3420,7 @@ function generateTourCompleteXLSX(tourId) {
             const [hh, mm] = timeStr.split(':').map(Number);
             sortKey = hh * 60 + mm;
           } else if (st) {
-            const totalMins = startH * 60 + startM + (ri * 2 + mi) * 30;
+            const totalMins = startH * 60 + startM + (ri * 2 + mi) * iv;
             timeStr = `${String(Math.floor(totalMins / 60)).padStart(2,'0')}:${String(totalMins % 60).padStart(2,'0')}`;
             sortKey = totalMins;
           }
@@ -3487,8 +3551,12 @@ function _buildAdminHistory() {
 function _adminMatchMins(cat, ri, mi) {
   const st = cat.fixtureConfig?.startTime;
   if (!st) return null;
+  const iv = cat.fixtureConfig?.intervalMins || 30;
+  const mpr = Math.floor((cat.fixtureConfig?.groupSize || 4) / 2);
+  const parallel = cat.fixtureConfig?.parallelCourts;
+  const slotIndex = parallel ? ri : (ri * mpr + mi);
   const [h, m] = st.split(':').map(Number);
-  return h * 60 + m + (ri * 2 + mi) * 30;
+  return h * 60 + m + slotIndex * iv;
 }
 function _adminMinsToStr(mins) {
   if (mins === null || mins === undefined) return null;
@@ -3952,14 +4020,14 @@ function renderEquipos() {
         </div>
       </div>`;
     }).join('')}</div>`;
-  const canGenerate = !hasGroups && teams.length >= 4 && teams.length % 4 === 0;
+  const canGenerate = !hasGroups && teams.length >= 3 && (teams.length % 3 === 0 || teams.length % 4 === 0);
   const rightBtn = hasGroups
     ? `<button class="btn btn-secondary" onclick="navigate('grupos')" style="flex:1"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><path d="M3 3h7v7H3z"/><path d="M14 3h7v7h-7z"/><path d="M3 14h7v7H3z"/><path d="M14 14h7v7h-7z"/></svg> Ver Grupos</button>`
     : canGenerate
       ? `<button class="btn btn-secondary" onclick="navigate('grupos')" style="flex:1"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Armar Grupos</button>`
       : '';
-  const warningMsg = !hasGroups && !canGenerate && teams.length >= 4
-    ? `<div class="alert alert-warning" style="margin-top:8px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Tienes ${teams.length} equipos. El número debe ser múltiplo de 4 para armar grupos.</div>`
+  const warningMsg = !hasGroups && !canGenerate && teams.length >= 3
+    ? `<div class="alert alert-warning" style="margin-top:8px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> Tienes ${teams.length} equipos. El número debe ser múltiplo de 3 o de 4 para armar grupos.</div>`
     : '';
   const genBtn = `<div style="display:flex;gap:8px;margin-top:40px">
     <button class="btn btn-primary" style="flex:1" onclick="openAddTeamModal()">+ Agregar Equipo</button>
@@ -3982,11 +4050,14 @@ function renderEquipos() {
 }
 
 /* ═══════════════════════ FIXTURE PAGE ═══════════════════════ */
-function getMatchTime(startTime, roundIndex, matchIndexInRound) {
+function getMatchTime(startTime, roundIndex, matchIndexInRound, intervalMins, matchesPerRound, parallelCourts) {
   if (!startTime) return null;
-  const slotIndex = roundIndex * 2 + matchIndexInRound;
+  const iv = intervalMins || 30;
+  const mpr = matchesPerRound || 2; // 2 para grupos de 4, 1 para grupos de 3
+  // parallelCourts: todos los partidos de una ronda ocurren al mismo tiempo
+  const slotIndex = parallelCourts ? roundIndex : (roundIndex * mpr + matchIndexInRound);
   const [h, m] = startTime.split(':').map(Number);
-  const total = h * 60 + m + slotIndex * 30;
+  const total = h * 60 + m + slotIndex * iv;
   return `${String(Math.floor(total/60)).padStart(2,'0')}:${String(total%60).padStart(2,'0')}`;
 }
 
@@ -4002,56 +4073,114 @@ function renderGruposPage() {
   // Sin grupos: mostrar UI de asignación inline (antes era un modal)
   if (!cat.groups || cat.groups.length === 0) {
     const n = cat.teams.length;
-    if (n < 4) return `<div class="empty-state"><div class="icon">${SVG_USERS_LG}</div><h3>Sin equipos suficientes</h3><p>Agrega al menos 4 equipos desde Equipos.</p><button class="btn btn-primary" style="margin-top:16px" onclick="navigate('equipos')">+ Agregar Equipo</button></div>`;
-    if (n % 4 !== 0) return `<div class="empty-state"><div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><h3>Número de equipos incorrecto</h3><p>Tienes ${n} equipos. Necesitas un múltiplo de 4 (4, 8, 12, 16, 20...).</p><button class="btn btn-primary" style="margin-top:16px" onclick="navigate('equipos')">← Ir a Equipos</button></div>`;
+    if (n < 3) return `<div class="empty-state"><div class="icon">${SVG_USERS_LG}</div><h3>Sin equipos suficientes</h3><p>Agrega al menos 3 equipos desde Equipos.</p><button class="btn btn-primary" style="margin-top:16px" onclick="navigate('equipos')">+ Agregar Equipo</button></div>`;
+    const canBy3 = n % 3 === 0;
+    const canBy4 = n % 4 === 0;
+    if (!canBy3 && !canBy4) return `<div class="empty-state"><div class="icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div><h3>Número de equipos incorrecto</h3><p>Tienes ${n} equipos. Necesitas un múltiplo de 3 o de 4 para armar grupos.</p><button class="btn btn-primary" style="margin-top:16px" onclick="navigate('equipos')">← Ir a Equipos</button></div>`;
 
-    const numGroups = Math.floor(n / 4);
-    const groupNames = Array.from({length: numGroups}, (_, i) => String(i + 1));
-    if (!window._groupAssignments || Object.keys(window._groupAssignments).length !== n) {
-      window._groupAssignments = {};
-      cat.teams.forEach((t, i) => { window._groupAssignments[t.id] = groupNames[i % numGroups]; });
+    /* ── Inicializar _fixtureConfig (antes de calcular groupSize) ── */
+    if (!window._fixtureConfig) window._fixtureConfig = { startTime: cat.fixtureConfig?.startTime || '8:30', intervalMins: cat.fixtureConfig?.intervalMins || 30 };
+    /* ── Determinar tamaño de grupo (preferir 4 si disponible) ── */
+    if (!window._fixtureConfig.groupSize || (!canBy3 && window._fixtureConfig.groupSize === 3) || (!canBy4 && window._fixtureConfig.groupSize === 4)) {
+      window._fixtureConfig.groupSize = canBy4 ? 4 : 3;
     }
-    if (!window._fixtureConfig) window._fixtureConfig = { startTime: cat.fixtureConfig?.startTime || '8:30' };
+    const groupSize = window._fixtureConfig.groupSize;
+    const numGroups = Math.floor(n / groupSize);
+    const groupNames = Array.from({length: numGroups}, (_, i) => String(i + 1));
+    /* ── Inicializar asignaciones y ORDEN dentro de cada grupo ── */
+    if (!window._groupAssignments || Object.keys(window._groupAssignments).length !== n || window._groupSizeForAssign !== groupSize) {
+      window._groupSizeForAssign = groupSize;
+      window._groupAssignments = {};
+      window._groupOrder       = {};
+      groupNames.forEach(g => { window._groupOrder[g] = []; });
+      cat.teams.forEach((t, i) => {
+        const g = groupNames[i % numGroups];
+        window._groupAssignments[t.id] = g;
+        window._groupOrder[g].push(t.id);
+      });
+    }
+    if (!window._groupOrder) {
+      window._groupOrder = {};
+      groupNames.forEach(g => { window._groupOrder[g] = []; });
+      Object.entries(window._groupAssignments).forEach(([tid, g]) => {
+        if (window._groupOrder[g] && !window._groupOrder[g].includes(tid)) window._groupOrder[g].push(tid);
+      });
+    }
 
+    /* ── Construir groupMap respetando el orden de _groupOrder ── */
     const groupMap = {};
-    groupNames.forEach(g => groupMap[g] = []);
-    Object.entries(window._groupAssignments).forEach(([tid, g]) => { if (groupMap[g]) groupMap[g].push(tid); });
-    const canGenerate = groupNames.every(g => groupMap[g].length === 4);
+    groupNames.forEach(g => { groupMap[g] = (window._groupOrder[g] || []).filter(tid => window._groupAssignments[tid] === g); });
+    /* Safety: equipos que no cayeron en _groupOrder */
+    cat.teams.forEach(t => {
+      const g = window._groupAssignments[t.id];
+      if (g && groupMap[g] && !groupMap[g].includes(t.id)) groupMap[g].push(t.id);
+    });
+    const canGenerate = groupNames.every(g => groupMap[g].length === groupSize);
 
-    const teamRows = cat.teams.map(t => {
-      const assigned = window._groupAssignments[t.id] || groupNames[0];
-      const init = t.name.trim().split(/\s+/).slice(0,2).map(w=>w[0]||'').join('').toUpperCase();
-      return `<div class="team-item" style="margin-bottom:6px;--team-color:${t.color||'var(--green)'}">
-        <div class="team-avatar" style="background:${t.color||'var(--green)'}">${init}</div>
-        <div class="team-info">
-          <div class="team-name-text">${escHtml(t.name)}</div>
-          ${t.players ? `<span class="team-meta" style="display:inline-flex;align-items:center;gap:3px">${SVG_USERS} ${t.players}</span>` : ''}
-        </div>
-        <div style="padding-right:12px;flex-shrink:0">
-          <select class="input" style="width:auto;min-width:90px;padding:6px 28px 6px 10px;font-size:13px;font-weight:700"
-            onchange="assignTeamToGroup('${t.id}',this.value)">
-            ${groupNames.map(g => `<option value="${g}" ${assigned===g?'selected':''}>Grupo ${g}</option>`).join('')}
+    /* ── Tarjetas de grupos con drag & drop ── */
+    const _SVG_GRIP = `<svg width="10" height="16" viewBox="0 0 10 16" fill="currentColor"><circle cx="3" cy="3" r="1.5"/><circle cx="7" cy="3" r="1.5"/><circle cx="3" cy="8" r="1.5"/><circle cx="7" cy="8" r="1.5"/><circle cx="3" cy="13" r="1.5"/><circle cx="7" cy="13" r="1.5"/></svg>`;
+    const groupCards = groupNames.map(g => {
+      const ok    = groupMap[g].length === groupSize;
+      const items = groupMap[g].map((tid, idx) => {
+        const t    = cat.teams.find(x => x.id === tid);
+        if (!t) return '';
+        const init = t.name.trim().split(/\s+/).slice(0,2).map(w=>w[0]||'').join('').toUpperCase();
+        return `
+        <div data-dd="${tid}" data-dd-grp="${g}"
+          style="display:flex;align-items:center;gap:8px;padding:9px 10px;background:white;border-radius:10px;border:1.5px solid var(--border);margin-bottom:6px;user-select:none;-webkit-user-select:none;touch-action:auto">
+          <div ontouchstart="_ddStart(event,'${tid}','${g}')" onmousedown="_ddStart(event,'${tid}','${g}')"
+            style="touch-action:none;cursor:grab;padding:6px 5px;color:var(--gray);flex-shrink:0;opacity:0.6">
+            ${_SVG_GRIP}
+          </div>
+          <div style="width:28px;height:28px;border-radius:50%;background:${t.color||'var(--green)'};display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;color:white;flex-shrink:0">${init}</div>
+          <span style="font-weight:700;font-size:13px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escHtml(t.name)}</span>
+          <span style="font-size:10px;font-weight:800;color:var(--text-muted);flex-shrink:0;min-width:14px;text-align:center">${idx+1}</span>
+          <select onchange="assignTeamToGroup('${tid}',this.value)"
+            style="font-size:12px;font-weight:700;padding:5px 22px 5px 8px;border:1.5px solid var(--border);border-radius:7px;background:white;color:var(--text);flex-shrink:0;cursor:pointer">
+            ${groupNames.map(gn => `<option value="${gn}" ${g===gn?'selected':''}>G${gn}</option>`).join('')}
           </select>
+        </div>`;
+      }).join('');
+      return `
+      <div style="background:white;border-radius:var(--radius);border:2px solid ${ok?'var(--green)':'var(--border-strong)'};padding:12px;margin-bottom:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <div style="font-weight:900;font-size:14px;color:${ok?'var(--green-dark)':'var(--text)'};display:flex;align-items:center;gap:6px">
+            ${SVG_COURT} Grupo ${g}
+          </div>
+          <span style="font-size:12px;font-weight:700;padding:2px 8px;border-radius:20px;background:${ok?'var(--green-pale)':'#fef3c7'};color:${ok?'var(--green)':'var(--gold)'}">
+            ${groupMap[g].length}/${groupSize} ${ok?'✓':''}
+          </span>
         </div>
-      </div>`;
-    }).join('');
-
-    const groupPreview = groupNames.map(g => {
-      const teams = groupMap[g].map(tid => { const t = cat.teams.find(x => x.id === tid); return t ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:${t.color};display:inline-block"></span>${escHtml(t.name)}</span>` : ''; }).join(' · ');
-      const count = groupMap[g].length;
-      const ok = count === 4;
-      return `<div style="display:flex;align-items:baseline;gap:8px;padding:8px 10px;border-radius:8px;margin-bottom:6px;background:${ok?'#eafaf1':'#fef9e7'};border:1.5px solid ${ok?'#27ae60':'#e8a020'}">
-        <span style="font-weight:900;font-size:13px;color:${ok?'#1a7a4a':'#7d6500'};white-space:nowrap">Grupo ${g} ${ok?'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><polyline points="20 6 9 17 4 12"/></svg>':'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>'} ${count}/4</span>
-        <span style="font-size:12px;color:#555;flex:1">${teams || '<em>Sin equipos</em>'}</span>
+        ${items || `<div style="text-align:center;padding:12px;color:var(--text-muted);font-size:13px;font-style:italic">Sin equipos asignados</div>`}
       </div>`;
     }).join('');
 
     const selectedTime = window._fixtureConfig?.startTime || '8:30';
+    const selectedInterval = window._fixtureConfig?.intervalMins || 30;
+    const parallelCourts = groupSize === 4 && (window._fixtureConfig?.parallelCourts || false);
+    const totalCanchas = parallelCourts ? numGroups * 2 : numGroups;
+    const svgCourt28 = _svgI(`<rect x="2" y="4" width="20" height="16" rx="2"/><line x1="12" y1="4" x2="12" y2="20"/><path d="M9 12a3 3 0 0 0 6 0"/>`, 28);
     const courtCards = groupNames.map(g => {
-      const savedName = window._fixtureConfig?.courtNames?.[g] || '';
+      const savedName  = window._fixtureConfig?.courtNames?.[g]  || '';
+      const savedName2 = window._fixtureConfig?.courtNames2?.[g] || '';
+      if (parallelCourts) {
+        return `
+        <div style="flex:1;background:var(--green-pale);border:2px solid var(--green);border-radius:var(--radius-sm);padding:10px 8px;text-align:center;min-width:0">
+          <div style="margin-bottom:6px;display:flex;justify-content:center">${svgCourt28}</div>
+          <div style="font-size:10px;color:var(--text-light);font-weight:700;margin-bottom:6px">GRUPO ${g}</div>
+          <input type="text" id="court-name-${g}"
+            value="${escHtml(savedName)}" placeholder="Cancha A"
+            oninput="setCourtName('${g}',this.value)"
+            style="width:100%;text-align:center;font-size:13px;font-weight:900;padding:4px 3px;border:1.5px solid var(--green);border-radius:6px;background:white;color:var(--green-dark);box-sizing:border-box;margin-bottom:4px">
+          <input type="text" id="court-name-${g}-2"
+            value="${escHtml(savedName2)}" placeholder="Cancha B"
+            oninput="setCourtName2('${g}',this.value)"
+            style="width:100%;text-align:center;font-size:13px;font-weight:900;padding:4px 3px;border:1.5px solid var(--green);border-radius:6px;background:white;color:var(--green-dark);box-sizing:border-box">
+        </div>`;
+      }
       return `
       <div style="flex:1;background:var(--green-pale);border:2px solid var(--green);border-radius:var(--radius-sm);padding:10px 8px;text-align:center;min-width:0">
-        <div style="margin-bottom:6px;display:flex;justify-content:center">${_svgI(`<rect x="2" y="4" width="20" height="16" rx="2"/><line x1="12" y1="4" x2="12" y2="20"/><path d="M9 12a3 3 0 0 0 6 0"/>`, 28)}</div>
+        <div style="margin-bottom:6px;display:flex;justify-content:center">${svgCourt28}</div>
         <div style="font-size:10px;color:var(--text-light);font-weight:700;margin-bottom:4px">GRUPO ${g}</div>
         <input type="text" id="court-name-${g}"
           value="${escHtml(savedName)}" placeholder="N° cancha"
@@ -4059,41 +4188,65 @@ function renderGruposPage() {
           style="width:100%;text-align:center;font-size:14px;font-weight:900;padding:5px 4px;border:1.5px solid var(--green);border-radius:6px;background:white;color:var(--green-dark);box-sizing:border-box">
       </div>`;
     }).join('');
-    const horarioChips = ['8:30','11:30'].map(h => `
-      <div onclick="setFixtureHorario('${h}')"
-        style="flex:1;padding:12px 8px;border-radius:var(--radius-sm);text-align:center;cursor:pointer;font-weight:800;font-size:14px;transition:all 0.18s;
-          ${selectedTime===h ? 'background:var(--green);color:white;border:2px solid var(--green);box-shadow:var(--shadow-green)' : 'background:white;color:var(--text-light);border:2px solid var(--border)'}">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> ${h} hrs
-      </div>`).join('');
+
+    /* ── Toggle canchas paralelas (solo para grupos de 4) ── */
+    const parallelToggle = groupSize === 4 ? (() => {
+      const btn = (active, label, val) => `<button onclick="setParallelCourts(${val})"
+        style="flex:1;padding:9px 0;font-size:12px;font-weight:800;border-radius:var(--radius-sm);border:2.5px solid ${active?'var(--green)':'var(--border)'};background:${active?'var(--green-pale)':'white'};color:${active?'var(--green-dark)':'var(--text-muted)'};cursor:pointer;transition:all 0.15s">${label}</button>`;
+      return `<div class="card" style="margin-bottom:12px">
+        <div class="input-label" style="margin-bottom:8px">Modo de canchas</div>
+        <div style="display:flex;gap:8px">${btn(!parallelCourts,'1 cancha secuencial','false')}${btn(parallelCourts,'2 canchas paralelas','true')}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px">${parallelCourts
+          ? '2 partidos al mismo tiempo · 3 franjas horarias · igual al pantallazo'
+          : '1 partido por vez · 6 franjas horarias'}</div>
+      </div>`;
+    })() : '';
+
+    /* ── Selector de tamaño de grupo ── */
+    const groupSizeCard = (() => {
+      const btns = [3, 4].map(s => {
+        const valid  = s === 3 ? canBy3 : canBy4;
+        const active = groupSize === s;
+        return `<button ${valid ? `onclick="setGroupSize(${s})"` : 'disabled'} style="flex:1;padding:10px 0;font-size:15px;font-weight:900;border-radius:var(--radius-sm);border:2.5px solid ${active?'var(--green)':'var(--border)'};background:${active?'var(--green-pale)':'white'};color:${active?'var(--green-dark)':'var(--text-muted)'};cursor:${valid?'pointer':'not-allowed'};opacity:${valid?'1':'0.4'};transition:all 0.15s">${s} equipos</button>`;
+      }).join('');
+      return `<div class="card" style="margin-bottom:12px">
+        <div class="input-label" style="margin-bottom:8px">Equipos por grupo</div>
+        <div style="display:flex;gap:8px">${btns}</div>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px">${numGroups} grupo${numGroups>1?'s':''} de ${groupSize} equipos · ${n} en total</div>
+      </div>`;
+    })();
 
     return `
       <div class="section-header"><span class="section-title"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h7v7H3z"/><path d="M14 3h7v7h-7z"/><path d="M3 14h7v7H3z"/><path d="M14 14h7v7h-7z"/></svg> Armar Grupos</span></div>
 
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
-        <div class="card" style="margin:0">
-          <div class="input-label" style="margin-bottom:8px;display:flex;align-items:center;gap:5px">${SVG_COURT} Número de Canchas</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">${courtCards}</div>
-          <div style="font-size:12px;color:var(--text-light);margin-top:6px"><strong>${numGroups} cancha${numGroups>1?'s':''}</strong> para ${n} equipos.</div>
-        </div>
-        <div class="card" style="margin:0">
-          <div class="input-label" style="margin-bottom:8px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Horario de Inicio</div>
-          <div style="display:flex;flex-direction:column;gap:8px">${horarioChips}</div>
-        </div>
+      ${groupSizeCard}
+
+      ${parallelToggle}
+
+      <div class="card" style="margin-bottom:12px">
+        <div class="input-label" style="margin-bottom:8px;display:flex;align-items:center;gap:5px">${SVG_COURT} ${parallelCourts ? 'Canchas por grupo (A · B)' : 'Número de Canchas'}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px">${courtCards}</div>
+        <div style="font-size:12px;color:var(--text-light);margin-top:6px"><strong>${totalCanchas} cancha${totalCanchas>1?'s':''}</strong> para ${n} equipos${parallelCourts ? ' · 2 simultáneas por grupo' : ''}.</div>
       </div>
 
       <div class="card" style="margin-bottom:12px">
-        <div class="input-label" style="margin-bottom:8px">Asignar Equipos a Grupos</div>
-        ${teamRows}
+        <div class="input-label" style="margin-bottom:10px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Bloque Horario</div>
+        <div style="display:flex;flex-direction:column;gap:7px">${_renderBloqueCards(selectedTime, selectedInterval)}</div>
       </div>
 
       <div class="card" style="margin-bottom:12px">
-        <div class="input-label" style="margin-bottom:8px">Resumen</div>
-        ${groupPreview}
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px">
+          <div class="input-label" style="margin-bottom:0;flex:1">Orden de equipos en cada grupo</div>
+          <div style="font-size:11px;color:var(--text-muted);display:flex;align-items:center;gap:4px">
+            ${_SVG_GRIP} arrastrar para reordenar
+          </div>
+        </div>
+        ${groupCards}
       </div>
 
       <button class="btn btn-primary btn-full" style="${canGenerate?'':'opacity:0.45;cursor:not-allowed'}"
         ${canGenerate?`onclick="confirmGenerateFixture()"`:'disabled'}>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><polyline points="20 6 9 17 4 12"/></svg> ${canGenerate ? 'Confirmar grupos' : 'Completa los grupos (4 equipos c/u)'}
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><polyline points="20 6 9 17 4 12"/></svg> ${canGenerate ? 'Confirmar grupos' : `Completa los grupos (${groupSize} equipos c/u)`}
       </button>`;
   }
 
@@ -4217,6 +4370,7 @@ function renderFixturePage() {
     </div>`;
 
   const startTime = cat.fixtureConfig?.startTime || null;
+  const intervalMins = cat.fixtureConfig?.intervalMins || 30;
 
   // Horarios (izquierda) + buscador (derecha) en la misma fila
   let horariosHtml = '';
@@ -4224,7 +4378,7 @@ function renderFixturePage() {
     const numSlots = (cat.groups[0]?.rounds?.length || 3) * 2;
     const slots = Array.from({length: numSlots}, (_, i) => {
       const [h,m] = startTime.split(':').map(Number);
-      const total = h*60 + m + i*30;
+      const total = h*60 + m + i*intervalMins;
       return `${String(Math.floor(total/60)).padStart(2,'0')}:${String(total%60).padStart(2,'0')}`;
     });
     const courtsLabel = cat.fixtureConfig?.courts
@@ -4266,6 +4420,9 @@ function _buildFixtureResults(q) {
   if (!cat) return '';
   const ql = (q || '').toLowerCase().trim();
   const startTime = cat.fixtureConfig?.startTime || null;
+  const intervalMins = cat.fixtureConfig?.intervalMins || 30;
+  const _mpr = Math.floor((cat.fixtureConfig?.groupSize || 4) / 2);
+  const _parallel = cat.fixtureConfig?.parallelCourts || false;
   let html = '';
   let totalMatches = 0;
 
@@ -4284,8 +4441,8 @@ function _buildFixtureResults(q) {
       + escHtml(name.slice(idx + ql.length));
   };
 
-  // Render una fila de partido
-  const renderRow = (match, time) => {
+  // Render una fila de partido (matchCancha: solo en modo paralelo, muestra cancha específica del partido)
+  const renderRow = (match, time, matchCancha) => {
     const t1 = getTeamById(match.team1Id, cat);
     const t2 = getTeamById(match.team2Id, cat);
     const n1 = ql ? hl(t1?.name || '?') : escHtml(t1?.name || '?');
@@ -4293,12 +4450,13 @@ function _buildFixtureResults(q) {
     const c1 = t1?.color || '#ccc';
     const c2 = t2?.color || '#ccc';
     const timeHtml = time ? `<span class="fix-time">${SVG_CLOCK} ${time}</span>` : '';
+    const canchaTag = matchCancha ? `<span class="fix-time" style="color:var(--text-muted)">${SVG_COURT} ${escHtml(matchCancha)}</span>` : '';
     const statusTag = match.played
       ? `<span class="match-tag played">${SVG_CHECK}Jugado</span>`
       : `<span class="match-tag pending">${SVG_PENDING}</span>`;
     totalMatches++;
     return `<div class="fix-match-row ${match.played ? 'played' : ''}">
-      ${timeHtml}
+      ${timeHtml}${canchaTag}
       <span class="fix-team"><span class="match-dot" style="background:${c1}"></span><span class="fix-team-name">${n1}</span></span>
       <span class="fix-vs">vs</span>
       <span class="fix-team right"><span class="fix-team-name">${n2}</span><span class="match-dot" style="background:${c2}"></span></span>
@@ -4309,10 +4467,17 @@ function _buildFixtureResults(q) {
   // Render tarjeta de grupo estilo stat-group-card
   const renderGroupCard = ({ group, matchingMatches }) => {
     const groupInit = group.name.replace('Grupo ', '').trim().slice(0, 2).toUpperCase();
-    const canchaLabel = group.cancha
-      ? `<span class="stat-group-sub">${SVG_COURT} Cancha ${escHtml(group.cancha)}</span>` : '';
+    const isParallel = _parallel && group.canchas && group.canchas.length > 1;
+    // Cabecera: en modo paralelo mostrar ambas canchas, si no solo la cancha del grupo
+    const canchaLabel = isParallel
+      ? `<span class="stat-group-sub">${SVG_COURT} Canchas ${group.canchas.map(c => escHtml(c)).join(' · ')}</span>`
+      : group.cancha ? `<span class="stat-group-sub">${SVG_COURT} Cancha ${escHtml(group.cancha)}</span>` : '';
     const playedCount = matchingMatches.filter(({match}) => match.played).length;
-    const rows = matchingMatches.map(({match, ri, mi}) => renderRow(match, getMatchTime(startTime, ri, mi))).join('');
+    const rows = matchingMatches.map(({match, ri, mi}) => {
+      const time = getMatchTime(startTime, ri, mi, intervalMins, _mpr, isParallel);
+      const matchCancha = isParallel ? (group.canchas[mi] || null) : null;
+      return renderRow(match, time, matchCancha);
+    }).join('');
     return `<div class="stat-group-card">
       <div class="stat-group-header" style="background:linear-gradient(135deg,var(--green-dark) 0%,var(--green) 100%)">
         <div class="stat-group-header-watermark">${groupInit}</div>
@@ -4337,8 +4502,9 @@ function _buildFixtureResults(q) {
         if (ql) {
           const t1 = getTeamById(match.team1Id, cat);
           const t2 = getTeamById(match.team2Id, cat);
-          const time = getMatchTime(startTime, ri, mi) || '';
-          const cancha = group.cancha || '';
+          const isParallelG = _parallel && group.canchas && group.canchas.length > 1;
+          const time = getMatchTime(startTime, ri, mi, intervalMins, _mpr, isParallelG) || '';
+          const cancha = (isParallelG ? (group.canchas[mi] || '') : (group.cancha || ''));
           const matchesTeam = t1?.name?.toLowerCase().includes(ql) || t2?.name?.toLowerCase().includes(ql);
           const matchesCancha = cancha.toLowerCase().includes(ql);
           const matchesTime = time.includes(ql);
@@ -4451,10 +4617,14 @@ function _buildResultadosResults(q) {
   const ql = q.trim().toLowerCase();
 
   const startTime = cat.fixtureConfig?.startTime || null;
+  const _iv = cat.fixtureConfig?.intervalMins || 30;
+  const _mpr = Math.floor((cat.fixtureConfig?.groupSize || 4) / 2);
+  const _parallel = cat.fixtureConfig?.parallelCourts || false;
   function matchTime(ri, mi) {
     if (!startTime) return null;
     const [h, m] = startTime.split(':').map(Number);
-    const total = h * 60 + m + (ri * 2 + mi) * 30;
+    const slotIndex = _parallel ? ri : (ri * _mpr + mi);
+    const total = h * 60 + m + slotIndex * _iv;
     return `${String(Math.floor(total/60)).padStart(2,'0')}:${String(total%60).padStart(2,'0')}`;
   }
 
@@ -5249,6 +5419,7 @@ function addCategory(name) {
   if (tour.categories.find(c => c.name === name)) { alert('Ya existe esa categoría en este torneo'); return; }
   const cat = { id: uuid(), name, teams: [], groups: [], knockout: null, fixtureGenerated: false };
   tour.categories.push(cat);
+  _sortCategories(tour.categories);
   state.activeCategoryId = cat.id;
   saveState();
   closeModal();
@@ -5273,6 +5444,125 @@ function renameCategory(catId) {
   if (!val) return;
   const cat = getCategoryById(catId);
   if (cat) { cat.name = val; saveState(); closeModal(); renderPage(); }
+}
+
+/* ═══════════════════════ TEAM NAME AUTOCOMPLETE ═══════════════════════ */
+
+// Recopila todos los nombres únicos de equipos de la misma categoría en torneos anteriores
+function _getAllHistoricalTeamNames() {
+  const seen       = new Map(); // name.lower → { name, color }
+  const curCat     = getActiveCategory();
+  const curCatName = curCat?.name?.trim().toLowerCase() || null;
+  for (const tour of (state.tournaments || [])) {
+    for (const cat of (tour.categories || [])) {
+      // Solo sugerir equipos de la misma categoría (ej: "4to Básico" con "4to Básico")
+      if (curCatName && cat.name?.trim().toLowerCase() !== curCatName) continue;
+      for (const team of (cat.teams || [])) {
+        if (!team.name) continue;
+        const key = team.name.trim().toLowerCase();
+        if (!seen.has(key)) seen.set(key, { name: team.name.trim(), color: team.color || null });
+      }
+    }
+  }
+  // Excluir equipos que ya están en la categoría actual (excepto el que se está editando)
+  if (curCat) {
+    for (const team of (curCat.teams || [])) {
+      if (team.id === editingTeamId) continue;
+      seen.delete(team.name.trim().toLowerCase());
+    }
+  }
+  return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }));
+}
+
+// Resalta la parte que coincide con la búsqueda
+function _highlightTeamMatch(name, q) {
+  const idx = name.toLowerCase().indexOf(q.toLowerCase());
+  if (idx < 0) return escHtml(name);
+  return escHtml(name.slice(0, idx))
+    + `<mark style="background:#dcfce7;color:#14532d;font-weight:900;border-radius:2px;padding:0 1px">${escHtml(name.slice(idx, idx + q.length))}</mark>`
+    + escHtml(name.slice(idx + q.length));
+}
+
+let _teamSuggestIdx = -1; // índice resaltado con teclado
+
+function _teamNameSuggest(val) {
+  const container = document.getElementById('team-name-suggestions');
+  if (!container) return;
+  _teamSuggestIdx = -1;
+  const q = val.trim();
+  if (q.length < 1) { container.style.display = 'none'; return; }
+
+  const allTeams = _getAllHistoricalTeamNames();
+  const matches  = allTeams.filter(t => t.name.toLowerCase().includes(q.toLowerCase()));
+
+  if (!matches.length) { container.style.display = 'none'; return; }
+
+  container.style.display = 'block';
+  container.innerHTML = matches.slice(0, 12).map((t, i) =>
+    `<div class="hub-suggestion-item" data-idx="${i}"
+        data-name="${escHtml(t.name)}"
+        data-color="${escHtml(t.color||'')}"
+        onmousedown="event.preventDefault();_selectTeamNameSuggestion(this.dataset.name,this.dataset.color)">
+      <span class="hub-suggestion-dot" style="background:${escHtml(t.color||'#ccc')}"></span>
+      <span class="hub-suggestion-name">${_highlightTeamMatch(t.name, q)}</span>
+    </div>`
+  ).join('');
+}
+
+// Navegación con teclado (↑ ↓ Enter Escape)
+function _teamNameSuggestKey(e) {
+  const container = document.getElementById('team-name-suggestions');
+  if (!container || container.style.display === 'none') return;
+  const items = container.querySelectorAll('.hub-suggestion-item');
+  if (!items.length) return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    _teamSuggestIdx = Math.min(_teamSuggestIdx + 1, items.length - 1);
+    _teamSuggestHighlight(items);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    _teamSuggestIdx = Math.max(_teamSuggestIdx - 1, 0);
+    _teamSuggestHighlight(items);
+  } else if (e.key === 'Enter' && _teamSuggestIdx >= 0) {
+    e.preventDefault();
+    items[_teamSuggestIdx]?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+  } else if (e.key === 'Escape') {
+    container.style.display = 'none';
+    _teamSuggestIdx = -1;
+  }
+}
+
+function _teamSuggestHighlight(items) {
+  items.forEach((el, i) => {
+    el.style.background = i === _teamSuggestIdx ? '#f0fdf4' : '';
+    if (i === _teamSuggestIdx) el.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+function _selectTeamNameSuggestion(name, color) {
+  const input = document.getElementById('team-name-input');
+  if (input) { input.value = name; input.focus(); }
+  // Aplicar el color histórico del equipo si existe
+  if (color && TEAM_COLORS.includes(color)) {
+    window._selectedColor = color;
+    document.querySelectorAll('.color-opt').forEach(el => {
+      el.classList.toggle('selected',
+        el.style.background === color || el.style.backgroundColor === color);
+    });
+  }
+  const container = document.getElementById('team-name-suggestions');
+  if (container) container.style.display = 'none';
+  _teamSuggestIdx = -1;
+}
+
+function _closeTeamSuggestionsDelay() {
+  // Pequeño delay para que el mousedown de la sugerencia se registre primero
+  setTimeout(() => {
+    const container = document.getElementById('team-name-suggestions');
+    if (container) container.style.display = 'none';
+    _teamSuggestIdx = -1;
+  }, 160);
 }
 
 /* ═══════════════════════ ADD/EDIT TEAM MODAL ═══════════════════════ */
@@ -5337,9 +5627,14 @@ function showTeamModal(title, name, color, players) {
   document.getElementById('modal-title').textContent = title;
   document.getElementById('modal-footer').classList.add('hidden');
   document.getElementById('modal-body').innerHTML = `
-    <div class="input-group">
+    <div class="input-group" style="position:relative">
       <label class="input-label">Nombre del equipo</label>
-      <input class="input" id="team-name-input" type="text" value="${escHtml(name)}" placeholder="ej: Los Leones...">
+      <input class="input" id="team-name-input" type="text" value="${escHtml(name)}" placeholder="ej: Los Leones..."
+        autocomplete="off"
+        oninput="_teamNameSuggest(this.value)"
+        onkeydown="_teamNameSuggestKey(event)"
+        onblur="_closeTeamSuggestionsDelay()">
+      <div id="team-name-suggestions" style="display:none;position:absolute;top:calc(100% + 3px);left:0;right:0;z-index:600;background:white;border:1.5px solid var(--border);border-radius:var(--radius-sm);box-shadow:0 8px 24px rgba(0,0,0,0.13);overflow:hidden;max-height:210px;overflow-y:auto"></div>
     </div>
     <div class="input-group">
       <label class="input-label">Número de jugadores</label>
@@ -5561,20 +5856,12 @@ function renderGroupAssignmentModal() {
 
   // Cancha + horario config
   const selectedTime = window._fixtureConfig?.startTime || '8:30';
-  const horarios = ['8:30', '11:30'];
+  const selectedInterval = window._fixtureConfig?.intervalMins || 30;
   const courtCards = groupNames.map(g => `
     <div style="flex:1;background:var(--green-pale);border:2px solid var(--green);border-radius:var(--radius-sm);padding:12px 10px;text-align:center">
       <div style="font-size:22px;margin-bottom:4px"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="12" y1="4" x2="12" y2="20"/><path d="M9 12a3 3 0 0 0 6 0"/></svg>️</div>
       <div style="font-size:13px;font-weight:900;color:var(--green-dark)">Cancha ${g}</div>
       <div style="font-size:11px;color:var(--text-light);margin-top:2px;font-weight:600">Grupo ${g}</div>
-    </div>`).join('');
-  const horarioChips = horarios.map(h => `
-    <div onclick="setFixtureHorario('${h}')"
-      style="flex:1;padding:12px 8px;border-radius:var(--radius-sm);text-align:center;cursor:pointer;font-weight:800;font-size:14px;transition:all 0.18s;
-        ${selectedTime===h
-          ? 'background:var(--green);color:white;border:2px solid var(--green);box-shadow:var(--shadow-green)'
-          : 'background:white;color:var(--text-light);border:2px solid var(--border)'}">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> ${h} hrs
     </div>`).join('');
 
   document.getElementById('modal-body').innerHTML = `
@@ -5587,8 +5874,8 @@ function renderGroupAssignmentModal() {
     </div>
 
     <div class="divider"></div>
-    <div class="input-label" style="margin-bottom:8px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Horario de Inicio</div>
-    <div style="display:flex;gap:8px;margin-bottom:16px">${horarioChips}</div>
+    <div class="input-label" style="margin-bottom:8px"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle;flex-shrink:0"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> Bloque Horario</div>
+    <div style="display:flex;flex-direction:column;gap:7px;margin-bottom:16px">${_renderBloqueCards(selectedTime, selectedInterval)}</div>
 
     <div class="divider"></div>
     <div class="input-label" style="margin-bottom:8px">Equipos → Grupo</div>
@@ -5603,7 +5890,17 @@ function renderGroupAssignmentModal() {
 }
 
 function assignTeamToGroup(teamId, groupName) {
+  const oldGroup = window._groupAssignments[teamId];
   window._groupAssignments[teamId] = groupName;
+  /* Sincronizar _groupOrder */
+  if (window._groupOrder) {
+    if (oldGroup && window._groupOrder[oldGroup]) {
+      window._groupOrder[oldGroup] = window._groupOrder[oldGroup].filter(id => id !== teamId);
+    }
+    if (window._groupOrder[groupName] && !window._groupOrder[groupName].includes(teamId)) {
+      window._groupOrder[groupName].push(teamId);
+    }
+  }
   renderPage();
 }
 
@@ -5614,39 +5911,185 @@ function setCourtName(groupName, value) {
   // No re-render — el input mantiene su propio estado
 }
 
+function setGroupSize(size) {
+  window._fixtureConfig = window._fixtureConfig || {};
+  window._fixtureConfig.groupSize = size;
+  if (size !== 4) window._fixtureConfig.parallelCourts = false; // paralelo solo para grupos de 4
+  window._groupSizeForAssign = null; // forzar reinicio de asignaciones al cambiar tamaño
+  renderPage();
+}
+
+function setParallelCourts(val) {
+  window._fixtureConfig = window._fixtureConfig || {};
+  window._fixtureConfig.parallelCourts = val === true || val === 'true';
+  renderPage();
+}
+
+function setCourtName2(groupName, value) {
+  window._fixtureConfig = window._fixtureConfig || {};
+  if (!window._fixtureConfig.courtNames2) window._fixtureConfig.courtNames2 = {};
+  window._fixtureConfig.courtNames2[groupName] = value;
+  // No re-render — el input mantiene su propio estado
+}
+
 function setFixtureHorario(time) {
+  // Compatibilidad hacia atrás — llama setFixtureBloque si existe un bloque con ese horario
+  const bloque = FIXTURE_BLOQUES.find(b => b.startTime === time);
+  if (bloque) { setFixtureBloque(bloque.id); return; }
   window._fixtureConfig = window._fixtureConfig || {};
   window._fixtureConfig.startTime = time;
+  renderPage();
+}
+
+/* ═══════════════════ DRAG & DROP — ordenar equipos en grupos ═══════════════════
+   Soporta touch (iOS/Android) y mouse (desktop).
+   _groupOrder[grp] = [teamId, ...] es la fuente de verdad del orden.            */
+let _dd = null;
+
+function _ddStart(ev, teamId, grpName) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const isTouch = ev.type === 'touchstart';
+  const origEl  = document.querySelector(`[data-dd="${teamId}"]`);
+  if (!origEl) return;
+  const r  = origEl.getBoundingClientRect();
+  const cx = isTouch ? ev.touches[0].clientX : ev.clientX;
+  const cy = isTouch ? ev.touches[0].clientY : ev.clientY;
+
+  const clone = origEl.cloneNode(true);
+  Object.assign(clone.style, {
+    position:'fixed', left:r.left+'px', top:r.top+'px',
+    width:r.width+'px', margin:'0', zIndex:'9999',
+    pointerEvents:'none', opacity:'0.93',
+    boxShadow:'0 12px 40px rgba(0,0,0,0.22)',
+    borderRadius:'10px', border:'2px solid var(--green)',
+    background:'white', transform:'scale(1.03)'
+  });
+  document.body.appendChild(clone);
+  origEl.style.opacity = '0.2';
+  document.body.style.cursor = 'grabbing';
+
+  _dd = { teamId, grpName, clone, origEl, cy0: cy, top0: r.top, isTouch };
+
+  if (isTouch) {
+    document.addEventListener('touchmove', _ddMove, { passive: false });
+    document.addEventListener('touchend',  _ddEnd,  { passive: true  });
+  } else {
+    document.addEventListener('mousemove', _ddMove);
+    document.addEventListener('mouseup',   _ddEnd);
+  }
+}
+
+function _ddMove(ev) {
+  if (!_dd) return;
+  if (_dd.isTouch) ev.preventDefault();
+  const cy = _dd.isTouch ? ev.touches[0].clientY : ev.clientY;
+  const cx = _dd.isTouch ? ev.touches[0].clientX : ev.clientX;
+  _dd.clone.style.top = (_dd.top0 + cy - _dd.cy0) + 'px';
+
+  _dd.clone.style.visibility = 'hidden';
+  const under  = document.elementFromPoint(cx, cy);
+  _dd.clone.style.visibility = '';
+  const target = under?.closest('[data-dd]');
+
+  document.querySelectorAll('[data-dd]').forEach(el => { el.style.outline = ''; });
+  if (target && target !== _dd.origEl && target.dataset.ddGrp === _dd.grpName) {
+    target.style.outline = '2.5px solid var(--green)';
+    target.style.outlineOffset = '-2px';
+  }
+}
+
+function _ddEnd(ev) {
+  if (!_dd) return;
+  if (_dd.isTouch) {
+    document.removeEventListener('touchmove', _ddMove);
+    document.removeEventListener('touchend',  _ddEnd);
+  } else {
+    document.removeEventListener('mousemove', _ddMove);
+    document.removeEventListener('mouseup',   _ddEnd);
+  }
+
+  const cx = _dd.isTouch ? ev.changedTouches[0].clientX : ev.clientX;
+  const cy = _dd.isTouch ? ev.changedTouches[0].clientY : ev.clientY;
+
+  _dd.clone.style.visibility = 'hidden';
+  const under  = document.elementFromPoint(cx, cy);
+  _dd.clone.style.visibility = '';
+  const target = under?.closest('[data-dd]');
+
+  if (target && target !== _dd.origEl && target.dataset.ddGrp === _dd.grpName) {
+    const arr = window._groupOrder?.[_dd.grpName];
+    if (arr) {
+      const fi = arr.indexOf(_dd.teamId);
+      const ti = arr.indexOf(target.dataset.dd);
+      if (fi >= 0 && ti >= 0) { arr.splice(fi, 1); arr.splice(ti, 0, _dd.teamId); }
+    }
+  }
+
+  _dd.clone.remove();
+  _dd.origEl.style.opacity = '';
+  document.body.style.cursor = '';
+  document.querySelectorAll('[data-dd]').forEach(el => { el.style.outline = ''; });
+  _dd = null;
+  renderPage();
+}
+/* ═══════════════════════════════════════════════════════════════════════════ */
+
+function setFixtureBloque(bloqueId) {
+  const bloque = FIXTURE_BLOQUES.find(b => b.id === bloqueId);
+  if (!bloque) return;
+  window._fixtureConfig = window._fixtureConfig || {};
+  window._fixtureConfig.startTime   = bloque.startTime;
+  window._fixtureConfig.intervalMins = bloque.intervalMins;
   renderPage();
 }
 
 function confirmGenerateFixture() {
   const cat = getActiveCategory();
   const n = cat.teams.length;
-  const numGroups = Math.floor(n / 4);
+  const groupSize = window._fixtureConfig?.groupSize || 4;
+  const numGroups = Math.floor(n / groupSize);
   const groupNames = Array.from({length: numGroups}, (_, i) => String(i + 1));
   const groupMap = {};
-  groupNames.forEach(g => groupMap[g] = []);
-  Object.entries(window._groupAssignments).forEach(([tid, g]) => { if (groupMap[g]) groupMap[g].push(tid); });
+  groupNames.forEach(g => {
+    /* Usar _groupOrder para respetar el orden definido por el admin */
+    groupMap[g] = window._groupOrder?.[g]
+      ? window._groupOrder[g].filter(tid => window._groupAssignments[tid] === g)
+      : [];
+    /* Safety: agregar equipos que no quedaron en _groupOrder */
+    Object.entries(window._groupAssignments).forEach(([tid, grp]) => {
+      if (grp === g && !groupMap[g].includes(tid)) groupMap[g].push(tid);
+    });
+  });
   // Validate
   for (const g of groupNames) {
-    if (groupMap[g].length !== 4) { alert(`El Grupo ${g} no tiene 4 equipos`); return; }
+    if (groupMap[g].length !== groupSize) { alert(`El Grupo ${g} no tiene ${groupSize} equipos`); return; }
   }
   // Solo crear grupos (sin rounds aún — el fixture se genera desde la pestaña Grupos)
-  const courtNames = window._fixtureConfig?.courtNames || {};
+  const parallelCourts = groupSize === 4 && (window._fixtureConfig?.parallelCourts || false);
+  const courtNames  = window._fixtureConfig?.courtNames  || {};
+  const courtNames2 = window._fixtureConfig?.courtNames2 || {};
   cat.groups = groupNames.map(g => {
     const teamIds = groupMap[g];
-    // Leer el input directamente por si el usuario tipió pero no disparó oninput
-    const inputEl = document.getElementById('court-name-' + g);
-    const cancha = (inputEl?.value.trim()) || courtNames[g] || g;
-    return { id: uuid(), name: 'Grupo ' + g, cancha, teamIds, rounds: [] };
+    // Leer inputs directamente por si el usuario tipió pero no disparó oninput
+    const inputEl  = document.getElementById('court-name-' + g);
+    const inputEl2 = document.getElementById('court-name-' + g + '-2');
+    const cancha  = (inputEl?.value.trim())  || courtNames[g]  || g;
+    const cancha2 = (inputEl2?.value.trim()) || courtNames2[g] || '';
+    const group = { id: uuid(), name: 'Grupo ' + g, cancha, teamIds, rounds: [] };
+    if (parallelCourts && cancha2) group.canchas = [cancha, cancha2];
+    return group;
   });
   cat.fixtureGenerated = false;
   cat.knockout = null;
   cat.fixtureConfig = {
-    courts: numGroups,
-    startTime: window._fixtureConfig?.startTime || '8:30',
-    courtNames
+    courts:         parallelCourts ? numGroups * 2 : numGroups,
+    startTime:      window._fixtureConfig?.startTime    || '8:30',
+    intervalMins:   window._fixtureConfig?.intervalMins || 30,
+    groupSize,
+    parallelCourts,
+    courtNames,
+    ...(parallelCourts ? { courtNames2 } : {})
   };
   saveState(); closeModal();
   // Ir directo a la pestaña Grupos
@@ -5763,9 +6206,14 @@ function editGrupos() {
     group.teamIds.forEach(tid => { window._groupAssignments[tid] = group.name.replace('Grupo ', ''); });
   });
   window._fixtureConfig = {
-    startTime: cat.fixtureConfig?.startTime || '8:30',
-    courtNames: { ...(cat.fixtureConfig?.courtNames || {}) }
+    startTime:      cat.fixtureConfig?.startTime      || '8:30',
+    intervalMins:   cat.fixtureConfig?.intervalMins   || 30,
+    groupSize:      cat.fixtureConfig?.groupSize      || 4,
+    parallelCourts: cat.fixtureConfig?.parallelCourts || false,
+    courtNames:     { ...(cat.fixtureConfig?.courtNames  || {}) },
+    courtNames2:    { ...(cat.fixtureConfig?.courtNames2 || {}) }
   };
+  window._groupSizeForAssign = null; // forzar reinicio de asignaciones
   cat.groups = [];
   saveState(); renderPage();
 }
@@ -5826,6 +6274,9 @@ function generateFixtureXLSX() {
   const tour = getActiveTournament();
   const fechaLabel = document.getElementById('exp-fecha')?.value.trim() || '';
   const startTime = cat.fixtureConfig?.startTime || '8:30';
+  const intervalMins = cat.fixtureConfig?.intervalMins || 30;
+  const _mpr = Math.floor((cat.fixtureConfig?.groupSize || 4) / 2);
+  const _parallel = cat.fixtureConfig?.parallelCourts || false;
 
   // Construir filas del sheet
   const rows = [];
@@ -5843,8 +6294,10 @@ function generateFixtureXLSX() {
       round.matches.forEach((match, mi) => {
         const t1 = getTeamById(match.team1Id, cat);
         const t2 = getTeamById(match.team2Id, cat);
-        const time = getMatchTime(startTime, ri, mi) || '';
-        rows.push([t1?.name || '?', 'vs', t2?.name || '?', time]);
+        const isParallelG = _parallel && group.canchas && group.canchas.length > 1;
+        const time = getMatchTime(startTime, ri, mi, intervalMins, _mpr, isParallelG) || '';
+        const xlsxCancha = isParallelG ? (group.canchas[mi] || canchaName) : canchaName;
+        rows.push([t1?.name || '?', 'vs', t2?.name || '?', time, xlsxCancha !== canchaName ? `Cancha ${xlsxCancha}` : '']);
       });
     });
 
